@@ -10,7 +10,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from .astutil import dotted_path
+from .astutil import dotted_path, last_segment
 from .finding import ToolDefinition
 
 # Import roots that indicate this file is probably an MCP server.
@@ -20,6 +20,14 @@ MCP_IMPORT_ROOTS = {"mcp", "fastmcp"}
 # rather than the full path because the server object can be named anything:
 # `@mcp.tool()`, `@app.tool()`, `@srv.tool()` are all the same pattern.
 TOOL_DECORATOR_SUFFIXES = {"tool", "call_tool"}
+
+# Registration is not always a decorator. FastMCP takes a plain function
+# reference too -- `mcp.add_tool(search)`, `self.tool(find, name="q-find")`
+# -- and mcp-server-qdrant among others registers every tool that way. A
+# scanner that only reads decorator_list reports zero tools for those
+# servers and then says nothing is wrong, which is the worst outcome this
+# module can produce.
+TOOL_REGISTRATION_SUFFIXES = {"tool", "add_tool"}
 
 # Parameters that are injected by the framework, not supplied by the caller.
 # Rules care about caller-controlled input, so these are excluded.
@@ -99,12 +107,14 @@ def find_tools(tree: ast.Module, path: str) -> list[ToolDefinition]:
     tools defined inside a factory function or a class still get found.
     """
     tools: list[ToolDefinition] = []
+    claimed: set[int] = set()
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for dec in node.decorator_list:
             if not _is_tool_decorator(dec):
                 continue
+            claimed.add(id(node))
             tools.append(
                 ToolDefinition(
                     name=_tool_name_from_decorator(dec, node.name),
@@ -117,6 +127,86 @@ def find_tools(tree: ast.Module, path: str) -> list[ToolDefinition]:
                 )
             )
             break  # one tool per function, even if stacked decorators match
+    tools.extend(_registered_tools(tree, path, claimed))
+    return tools
+
+
+def _function_table(tree: ast.Module) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Every function in the module, by name. Nested ones included -- the
+    registered implementation is usually a closure over the server."""
+    table: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            table.setdefault(node.name, node)
+    return table
+
+
+def _name_aliases(tree: ast.Module) -> dict[str, str]:
+    """Follow `handler = find` so a registration through a local resolves.
+
+    Only plain name-to-name bindings are recorded, so a rebind through a
+    call -- `find = make_partial(find, ...)` -- leaves the original mapping
+    intact rather than replacing it with something unresolvable.
+    """
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not isinstance(node.value, (ast.Name, ast.Attribute)):
+            continue
+        source = last_segment(dotted_path(node.value))
+        for target in node.targets:
+            if isinstance(target, ast.Name) and source:
+                aliases.setdefault(target.id, source)
+    return aliases
+
+
+def _resolve_function(
+    reference: ast.expr,
+    functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+    aliases: dict[str, str],
+) -> tuple[str, ast.FunctionDef | ast.AsyncFunctionDef | None]:
+    name = last_segment(dotted_path(reference))
+    seen: set[str] = set()
+    while name and name not in functions and name in aliases and name not in seen:
+        seen.add(name)
+        name = aliases[name]
+    return name, functions.get(name)
+
+
+def _registered_tools(tree: ast.Module, path: str, claimed: set[int]) -> list[ToolDefinition]:
+    """Tools passed to a registration call rather than wearing a decorator."""
+    functions = _function_table(tree)
+    aliases = _name_aliases(tree)
+    tools: list[ToolDefinition] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        if last_segment(_decorator_path(node.func)) not in TOOL_REGISTRATION_SUFFIXES:
+            continue
+        reference = node.args[0]
+        # `@mcp.tool("search_docs")` passes a name, not a function. Only a
+        # reference to something callable is a registration.
+        if not isinstance(reference, (ast.Name, ast.Attribute)):
+            continue
+        function_name, func = _resolve_function(reference, functions, aliases)
+        if func is not None and id(func) in claimed:
+            continue
+        if func is not None:
+            claimed.add(id(func))
+        tools.append(
+            ToolDefinition(
+                name=_tool_name_from_decorator(node, function_name),
+                function_name=function_name,
+                path=path,
+                # Point at the implementation when we found it; the
+                # registration call is only a stand-in.
+                line=func.lineno if func is not None else node.lineno,
+                parameters=_caller_supplied_params(func) if func is not None else [],
+                decorator=_decorator_path(node.func),
+                node=func,
+            )
+        )
     return tools
 
 

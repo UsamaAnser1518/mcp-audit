@@ -107,3 +107,72 @@ def test_iter_python_files_skips_noise(tmp_path):
     (tmp_path / "notes.txt").write_text("hi")
     found = [p.name for p in iter_python_files(tmp_path)]
     assert found == ["keep.py"]
+
+
+def test_programmatic_registration_is_detected():
+    """FastMCP takes a function reference, not only a decorator."""
+    tools = _tools("def search(query: str): pass\nmcp.add_tool(search)\n")
+    assert len(tools) == 1
+    assert tools[0].name == "search"
+    assert tools[0].parameters == ["query"]
+
+
+def test_programmatic_registration_honours_the_name_override():
+    tools = _tools("def find(query: str): pass\nmcp.tool(find, name='qdrant-find')\n")
+    assert tools[0].name == "qdrant-find"
+    assert tools[0].function_name == "find"
+
+
+def test_programmatic_registration_through_a_local_alias():
+    """Found against mcp-server-qdrant, which registers via a local."""
+    source = """
+def build():
+    async def find(query: str): pass
+
+    handler = find
+    self.tool(handler, name="qdrant-find")
+"""
+    tools = _tools(source)
+    assert len(tools) == 1
+    assert tools[0].name == "qdrant-find"
+    assert tools[0].parameters == ["query"]
+
+
+def test_rebinding_through_a_call_does_not_lose_the_function():
+    """`find = make_partial(find, ...)` must not break resolution."""
+    source = """
+def build():
+    async def find(query: str): pass
+
+    handler = find
+    handler = make_partial_function(handler, {})
+    self.tool(handler, name="qdrant-find")
+"""
+    tools = _tools(source)
+    assert len(tools) == 1
+    assert tools[0].parameters == ["query"]
+
+
+def test_unresolvable_registration_is_still_counted():
+    """The tool is exposed even if we cannot find its body to analyse."""
+    tools = _tools("mcp.add_tool(imported_from_elsewhere)\n")
+    assert len(tools) == 1
+    assert tools[0].node is None
+    assert tools[0].parameters == []
+
+
+def test_positional_name_is_not_mistaken_for_a_function_reference():
+    tools = _tools("@mcp.tool('exposed')\ndef internal(): pass")
+    assert len(tools) == 1
+    assert tools[0].name == "exposed"
+
+
+def test_a_decorated_tool_is_not_counted_twice_when_also_registered():
+    source = """
+@mcp.tool()
+def search(query: str): pass
+
+mcp.add_tool(search)
+"""
+    tools = _tools(source)
+    assert len(tools) == 1

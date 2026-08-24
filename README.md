@@ -53,15 +53,19 @@ mcp-audit path/to/repo/ --format json
 mcp-audit path/to/repo/ --format sarif     # GitHub Code Scanning
 mcp-audit path/to/repo/ --fail-on high     # non-zero exit for CI
 mcp-audit path/to/repo/ --quiet            # findings only, no summary or fixes
+mcp-audit path/to/repo/ --include-tests    # test files are skipped by default
 ```
 
 Exit codes: `0` nothing to report (or findings below the `--fail-on` threshold), `1` a finding
 met the threshold, `2` the path does not exist or the arguments were wrong. Without
 `--fail-on`, findings alone never fail the build -- a report is not an error.
 
-A directory scan analyses files that import `mcp`/`fastmcp` or register a tool decorator, and
-skips the rest. A file named explicitly on the command line is always analysed, because
-silently doing nothing to a file the user asked about is the wrong answer.
+A directory scan analyses files that import `mcp`/`fastmcp` or register a tool, and skips the
+rest. Test files are skipped too -- a test that builds a fake server is not a deployed server,
+and its hardcoded key is a fixture. The count is always printed rather than hidden, and
+`--include-tests` turns it off. Pointing the scanner straight at a test directory scans it
+regardless, and a file named explicitly on the command line is always analysed: silently doing
+nothing to a file the user asked about is the wrong answer.
 
 ## Rules
 
@@ -130,7 +134,9 @@ cli.py      text, JSON, SARIF
 Tools are found with `ast.walk` rather than by iterating module-level statements, so a tool
 defined inside a factory function is still found -- a missed tool is a silent false negative,
 the worst bug class for a scanner. Decorators are matched on the last dotted segment, so
-`@mcp.tool()`, `@app.tool()` and `@srv.tool()` are one pattern rather than three.
+`@mcp.tool()`, `@app.tool()` and `@srv.tool()` are one pattern rather than three. Registration
+without a decorator counts too: `mcp.add_tool(search)` and `self.tool(handler, name="find")`
+are how several real servers register everything they expose, including through a local alias.
 
 MCP003 and MCP004 share one taint engine, so the two rules cannot drift apart on what "reaches"
 means. It propagates a tool parameter through local assignments, tuple unpacking, loop and

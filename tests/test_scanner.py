@@ -119,6 +119,48 @@ def test_counts_by_severity():
     assert counts[Severity.MEDIUM] == 1
 
 
+def test_test_files_are_skipped_below_the_root(tmp_path):
+    """Found against mcp-atlassian, where 10 of 13 findings were fixtures."""
+    (tmp_path / "server.py").write_text(
+        "import mcp\n@mcp.tool()\ndef t(c: str):\n    __import__('os').system(c)\n"
+    )
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_server.py").write_text('import mcp\nAPI_KEY = "9f2c41d0e84a17b6c3"\n')
+    (tmp_path / "conftest.py").write_text('import mcp\nTOKEN = "9f2c41d0e84a17b6c3"\n')
+
+    result = scan_path(tmp_path)
+    assert result.tests_skipped == 2
+    assert {f.path.split("/")[-1] for f in result.findings} == {"server.py"}
+
+
+def test_include_tests_scans_them_anyway(tmp_path):
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_server.py").write_text('import mcp\nAPI_KEY = "9f2c41d0e84a17b6c3"\n')
+
+    result = scan_path(tmp_path, include_tests=True)
+    assert result.tests_skipped == 0
+    assert [f.rule_id for f in result.findings] == ["MCP002"]
+
+
+def test_pointing_at_a_test_directory_scans_it(tmp_path):
+    """mcp-audit's own fixtures live in one; aiming there is deliberate."""
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_server.py").write_text('import mcp\nAPI_KEY = "9f2c41d0e84a17b6c3"\n')
+
+    result = scan_path(tests)
+    assert result.tests_skipped == 0
+    assert [f.rule_id for f in result.findings] == ["MCP002"]
+
+
+def test_naming_a_test_file_scans_it(tmp_path):
+    target = tmp_path / "test_server.py"
+    target.write_text('import mcp\nAPI_KEY = "9f2c41d0e84a17b6c3"\n')
+    assert [f.rule_id for f in scan_path(target).findings] == ["MCP002"]
+
+
 def test_empty_directory(tmp_path):
     result = scan_path(tmp_path)
     assert result.files_seen == 0

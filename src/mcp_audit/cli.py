@@ -84,6 +84,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="exit non-zero when a finding of this severity or worse is reported",
     )
     parser.add_argument(
+        "--include-tests",
+        action="store_true",
+        help="also scan test files (skipped by default: a test double is not a server)",
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="text format: findings only, no summary or remediation",
@@ -104,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"mcp-audit: {args.path}: no such file or directory", file=sys.stderr)
         return EXIT_USAGE
 
-    result = scan_path(args.path)
+    result = scan_path(args.path, include_tests=args.include_tests)
 
     if args.format == "json":
         print(json.dumps(to_json(result, args.path), indent=2))
@@ -166,6 +171,8 @@ def render_text(result: ScanResult, target: Path, colour: bool = False, quiet: b
         f"scanned {result.files_scanned} file(s) of {result.files_seen} seen, "
         f"{len(result.tools)} tool(s) in {_display_path(str(target))}"
     )
+    if result.tests_skipped:
+        scope += f" ({result.tests_skipped} test file(s) skipped, --include-tests to scan them)"
     lines.append(f"{summary} -- {scope}")
     if not result.findings and result.files_scanned == 0:
         lines.append(
@@ -215,6 +222,7 @@ def to_json(result: ScanResult, target: Path) -> dict:
             )},
             "files_seen": result.files_seen,
             "files_scanned": result.files_scanned,
+            "tests_skipped": result.tests_skipped,
             "tools": len(result.tools),
         },
         "findings": [f.to_dict() for f in result.findings],

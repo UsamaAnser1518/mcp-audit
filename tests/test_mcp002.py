@@ -44,6 +44,12 @@ def test_placeholder_is_not_a_credential():
     assert run(RULE, 'API_KEY = "xxxxxxxxxxxx"\n') == []
 
 
+def test_protocol_mechanism_names_are_not_credentials():
+    """Found against mcp-atlassian: an OAuth method name, not a secret."""
+    assert run(RULE, 'x = Client(token_endpoint_auth_method="client_secret_post")\n') == []
+    assert run(RULE, 'SIGNING_ALGORITHM = "HS256-with-rotation"\n') == []
+
+
 def test_short_value_is_not_a_credential():
     assert run(RULE, 'TOKEN = "abc"\n') == []
 

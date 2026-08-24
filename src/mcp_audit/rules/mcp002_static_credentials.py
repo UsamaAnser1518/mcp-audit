@@ -30,6 +30,10 @@ _NOT_A_SECRET_SUFFIX = (
     "_header", "_headers", "_name", "_names", "_env", "_var", "_field", "_url", "_uri",
     "_path", "_file", "_prefix", "_suffix", "_pattern", "_regex", "_ttl", "_expiry",
     "_len", "_length", "_type", "_id", "_param", "_params", "_query", "_arg", "_key_name",
+    # Found against mcp-atlassian, which sets
+    # token_endpoint_auth_method="client_secret_post" -- the name of an OAuth
+    # mechanism, not a secret.
+    "_method", "_methods", "_scheme", "_mode", "_algorithm", "_flow", "_grant_type",
 )
 
 # Values that are obviously a stand-in for the real thing.
