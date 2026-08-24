@@ -309,6 +309,53 @@ def test_containment_check_silences_the_path_finding():
         ''')) == []
 
 
+def test_named_validator_downgrades_a_path_finding():
+    """Found against mcp-server-git, which validates the repo path it is
+    handed. Reporting that as critical is a false alarm; saying nothing
+    would miss a check we never actually read."""
+    findings = run(RULE, server('''
+        from pathlib import Path
+
+        @mcp.tool()
+        def read(repo_path: str) -> str:
+            target = Path(repo_path)
+            validate_repo_path(target)
+            return target.read_text()
+        '''))
+    assert len(findings) == 1
+    assert findings[0].severity is Severity.HIGH
+    assert "does check the value first" in findings[0].detail
+
+
+def test_named_validator_does_not_downgrade_a_shell_finding():
+    """For a shell the fix is an argument list, not a validator."""
+    findings = run(RULE, server('''
+        import subprocess
+
+        @mcp.tool()
+        def run_command(cmd: str) -> str:
+            validate_command(cmd)
+            return subprocess.check_output(cmd, shell=True).decode()
+        '''))
+    assert len(findings) == 1
+    assert findings[0].severity is Severity.CRITICAL
+
+
+def test_check_output_does_not_vouch_for_its_own_argument():
+    """`check_` in subprocess means "raise on non-zero exit", not "validate"."""
+    findings = run(RULE, server('''
+        import subprocess
+
+        @mcp.tool()
+        def read(name: str) -> str:
+            subprocess.check_output(["ls", name])
+            return open(name).read()
+        '''))
+    path_findings = [f for f in findings if "filesystem path" in f.detail]
+    assert len(path_findings) == 1
+    assert path_findings[0].severity is Severity.CRITICAL
+
+
 def test_containment_check_does_not_silence_a_shell_finding():
     """Validating a value is not the fix for handing it to a shell."""
     findings = run(RULE, server('''

@@ -21,7 +21,7 @@ import re
 
 from ..astutil import build_alias_map, dotted_path, keyword_of, last_segment, resolve
 from ..finding import Finding, Severity
-from ..taint import TaintSet, analyse, taint_origins
+from ..taint import TaintSet, analyse, looks_guarded, taint_origins
 from .base import Rule, ScanContext, register
 
 _HTTP_ROOTS = {"requests", "httpx", "aiohttp", "urllib", "urllib3", "http", "socket", "websockets"}
@@ -38,10 +38,6 @@ _METHOD_FIRST = frozenset({"request", "send", "stream", "open"})
 # blindly, `config.get(key)` is a false positive -- so it only applies in a
 # file that imports an HTTP library.
 _CLIENT_RECEIVER = re.compile(r"client|session|http|aiohttp|requests|conn|api", re.IGNORECASE)
-
-# Names suggesting the author checked the URL before using it.
-_VALIDATOR = re.compile(r"valid|allow|check|ensure|sanit|verify|assert|guard|require|permit",
-                        re.IGNORECASE)
 
 # scheme://host/ as a literal prefix: the caller cannot move the request to
 # another origin from here.
@@ -82,7 +78,7 @@ class UnvalidatedUrlFetch(Rule):
         taints = analyse(func, tool.parameters, aliases)
         if not taints:
             return []
-        guarded = _looks_validated(func, taints, aliases)
+        guarded = looks_guarded(func, taints, aliases)
         findings: list[Finding] = []
         seen: set[tuple[int, int]] = set()
         for node in ast.walk(func):
@@ -185,41 +181,3 @@ def _has_fixed_origin(node: ast.expr, taints: TaintSet) -> bool:
         if isinstance(left, ast.Constant) and isinstance(left.value, str):
             return bool(_FIXED_ORIGIN.match(left.value))
     return False
-
-
-def _looks_validated(func, taints: TaintSet, aliases: dict[str, str]) -> bool:
-    """Did the author check the URL before using it?
-
-    Deliberately generous. This suppresses the finding, so the cost of a
-    wrong "yes" is a missed report -- but the alternative is flagging every
-    server that wrote an allowlist we did not recognise, and a scanner
-    people mute finds nothing at all.
-    """
-    names = taints.names()
-    for node in ast.walk(func):
-        if isinstance(node, ast.If) and _mentions(node.test, names) and _exits(node.body):
-            return True
-        if isinstance(node, ast.Assert) and _mentions(node.test, names):
-            return True
-        if isinstance(node, ast.Call):
-            target = last_segment(resolve(dotted_path(node.func), aliases))
-            if _VALIDATOR.search(target) and any(_mentions(a, names) for a in node.args):
-                return True
-    return False
-
-
-def _mentions(node: ast.AST, names: set[str]) -> bool:
-    for child in ast.walk(node):
-        if isinstance(child, ast.Name) and child.id in names:
-            return True
-        if isinstance(child, ast.Attribute) and dotted_path(child) in names:
-            return True
-    return False
-
-
-def _exits(body: list[ast.stmt]) -> bool:
-    return any(
-        isinstance(node, (ast.Raise, ast.Return))
-        for statement in body
-        for node in ast.walk(statement)
-    )

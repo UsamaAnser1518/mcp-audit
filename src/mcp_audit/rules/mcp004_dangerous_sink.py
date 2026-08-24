@@ -23,7 +23,7 @@ from ..astutil import (
     resolve,
 )
 from ..finding import Finding, Severity
-from ..taint import TaintSet, analyse, is_dynamic_string, taint_origins
+from ..taint import TaintSet, analyse, is_dynamic_string, looks_guarded, taint_origins
 from .base import Rule, ScanContext, register
 
 
@@ -152,7 +152,9 @@ class DangerousSink(Rule):
         # One line, one finding per sink kind. `open(Path(base, name))` is a
         # single mistake even though two sinks match it.
         seen: set[tuple[int, str]] = set()
-        contained = None  # computed once, and only if a path sink turns up
+        # Both computed once, and only if a path sink actually turns up.
+        contained = None
+        guarded = None
         for node in ast.walk(func):
             if not isinstance(node, ast.Call):
                 continue
@@ -162,11 +164,20 @@ class DangerousSink(Rule):
             origins = _tainted_arguments(node, sink, taints, aliases)
             if not origins:
                 continue
+            # A path is the one sink where validation, rather than a
+            # different API, is the accepted fix -- so seeing a check here
+            # means something. For a shell or a query it would not: the fix
+            # there is an argument list or a bound parameter, and "they
+            # validated it first" does not lower the risk much.
+            downgrade = False
             if sink.kind == "path":
                 if contained is None:
                     contained = _has_containment_check(func, taints, aliases)
                 if contained:
-                    continue
+                    continue  # resolve()/relative_to() is a complete check
+                if guarded is None:
+                    guarded = looks_guarded(func, taints, aliases)
+                downgrade = guarded
             key = (node.lineno, sink.kind)
             if key in seen:
                 continue
@@ -177,8 +188,9 @@ class DangerousSink(Rule):
                     line=node.lineno,
                     column=node.col_offset + 1,
                     tool_name=tool.name,
-                    detail=_detail(node, sink, origins, aliases),
+                    detail=_detail(node, sink, origins, aliases, guarded=downgrade),
                     remediation=_REMEDIATION[sink.kind],
+                    severity=Severity.HIGH if downgrade else None,
                 )
             )
         return findings
@@ -223,7 +235,13 @@ def _short_label(path: str) -> str:
     return ".".join(segs[-2:]) if len(segs) > 2 else path
 
 
-def _detail(call: ast.Call, sink: _Sink, origins: set[str], aliases: dict[str, str]) -> str:
+def _detail(
+    call: ast.Call,
+    sink: _Sink,
+    origins: set[str],
+    aliases: dict[str, str],
+    guarded: bool = False,
+) -> str:
     params = ", ".join(f"`{name}`" for name in sorted(origins))
     many = len(origins) > 1
     subject = f"Tool parameter{'s' if many else ''} {params}"
@@ -248,6 +266,12 @@ def _detail(call: ast.Call, sink: _Sink, origins: set[str], aliases: dict[str, s
             "the server's privileges."
         )
     if sink.kind == "path":
+        if guarded:
+            return (
+                f"{subject} {are} used as a filesystem path in {label}. This tool does check "
+                "the value first, so confirm the check runs before every use and that it "
+                "compares resolved paths -- ../ and symlinks both survive a naive test."
+            )
         return (
             f"{subject} {are} used as a filesystem path in {label}. A caller can traverse out "
             "of the intended directory with ../ or pass an absolute path."

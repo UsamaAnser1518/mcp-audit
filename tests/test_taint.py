@@ -7,7 +7,13 @@ once and the rule-level tests would only show it obliquely.
 import ast
 
 from mcp_audit.astutil import build_alias_map
-from mcp_audit.taint import analyse, is_dynamic_string, is_tainted, taint_origins
+from mcp_audit.taint import (
+    analyse,
+    is_dynamic_string,
+    is_tainted,
+    looks_guarded,
+    taint_origins,
+)
 
 IMPORT_SHLEX = "import shlex\n"
 FROM_IMPORT_QUOTE = "from shlex import quote\n"
@@ -146,3 +152,37 @@ def test_no_parameters_means_no_work():
     func, taints, origins = _analyse("    return 1\n", params=())
     assert not taints
     assert origins(_last_expression(func)) == set()
+
+
+def test_guard_recognises_a_branch_that_raises():
+    func, taints, _ = _analyse(
+        "    if not value:\n        raise ValueError(value)\n    return value\n"
+    )
+    assert looks_guarded(func, taints)
+
+
+def test_guard_recognises_a_named_validator():
+    func, taints, _ = _analyse("    validate_path(value)\n    return value\n")
+    assert looks_guarded(func, taints)
+
+
+def test_guard_recognises_a_method_on_the_value():
+    func, taints, _ = _analyse("    value.relative_to(BASE)\n    return value\n")
+    assert looks_guarded(func, taints)
+
+
+def test_guard_ignores_a_branch_that_falls_through():
+    func, taints, _ = _analyse("    if value:\n        pass\n    return value\n")
+    assert not looks_guarded(func, taints)
+
+
+def test_guard_ignores_a_check_of_something_else():
+    func, taints, _ = _analyse("    validate_path(other)\n    return value\n")
+    assert not looks_guarded(func, taints)
+
+
+def test_subprocess_check_calls_are_not_guards():
+    func, taints, _ = _analyse(
+        "    subprocess.check_output(value)\n    return value\n", preamble="import subprocess\n"
+    )
+    assert not looks_guarded(func, taints, build_alias_map(ast.parse("import subprocess")))

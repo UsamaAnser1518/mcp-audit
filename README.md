@@ -90,7 +90,11 @@ silenced: `mcp-audit` can see that somebody tried, but not whether the check is 
 **MCP004** covers `subprocess`, `os.system`/`os.popen`, `asyncio.create_subprocess_*`,
 `eval`/`exec`/`compile`, filesystem paths through `open`/`pathlib.Path`/`os.remove`, and SQL
 built by interpolation into `execute()`. A parameterised query is not a finding, and neither
-is a value that has been through `shlex.quote()` or `int()`.
+is a value that has been through `shlex.quote()` or `int()`. A path the tool validates first
+is graded down to High, and one checked with the `resolve()`/`relative_to()` containment idiom
+is not reported at all -- for a path, validation is the accepted fix. That reasoning does not
+extend to the other sinks, where the fix is an argument list or a bound parameter rather than
+a check, so those stay Critical however carefully the input was inspected.
 
 **MCP005** only speaks to servers that already verify tokens. It reports either "no scope check
 anywhere" or "scopes exist server-wide but these tools do not check one of their own".

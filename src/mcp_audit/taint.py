@@ -14,6 +14,7 @@ saying so.
 from __future__ import annotations
 
 import ast
+import re
 from collections.abc import Iterable, Iterator
 
 from .astutil import dotted_path, last_segment, matches, resolve
@@ -31,6 +32,19 @@ NEUTRALISING_CALLS = frozenset({"int", "float", "bool", "len", "shlex.quote"})
 # parameter that arrives at a sink this way is a *structural* part of the
 # command or query, which is precisely what parameterised APIs prevent.
 STRING_BUILDING_METHODS = frozenset({"format", "format_map", "join"})
+
+# Names that read as "the author tested this value before using it". Matched
+# on the last segment of the call target, so `url_is_allowed(url)` and
+# `target.relative_to(BASE)` both count.
+GUARD_NAMES = re.compile(
+    r"valid|allow|check|ensure|sanit|verify|assert|guard|require|permit"
+    r"|relative_to|commonpath|commonprefix",
+    re.IGNORECASE,
+)
+
+# ...except in subprocess, where "check" means "raise if the exit code is
+# non-zero". Without this, check_output() would vouch for its own argument.
+NOT_GUARDS = frozenset({"check_output", "check_call"})
 
 # Convergence is guaranteed -- the name set only grows -- but a long alias
 # chain in a pathological file should not cost quadratic time.
@@ -225,3 +239,61 @@ def _bound_names(target: ast.expr) -> list[str]:
         base = dotted_path(target.value)
         return [base] if base else []
     return []
+
+
+def looks_guarded(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    taints: TaintSet,
+    aliases: dict[str, str] | None = None,
+) -> bool:
+    """Did the author test a tainted value before using it?
+
+    Three shapes count: a branch on the value that raises or returns, an
+    assert, and a call whose name reads like a check. Deliberately
+    generous, because the answer only ever softens a finding -- so a wrong
+    "yes" costs one report, while a rule that flags every server which
+    wrote a check nobody recognised costs the whole audience.
+
+    What it emphatically does not do is verify the check. Whether the
+    allowlist covers 169.254.169.254 is beyond a parser.
+    """
+    aliases = aliases or {}
+    names = taints.names()
+    if not names:
+        return False
+    for node in ast.walk(func):
+        if isinstance(node, ast.If) and _mentions(node.test, names) and _exits(node.body):
+            return True
+        if isinstance(node, ast.Assert) and _mentions(node.test, names):
+            return True
+        if isinstance(node, ast.Call) and _is_guard_call(node, names, aliases):
+            return True
+    return False
+
+
+def _is_guard_call(node: ast.Call, names: set[str], aliases: dict[str, str]) -> bool:
+    target = last_segment(resolve(dotted_path(node.func), aliases))
+    if target in NOT_GUARDS or not GUARD_NAMES.search(target):
+        return False
+    # The value under test is the argument -- validate_path(p) -- or the
+    # receiver -- target.relative_to(BASE).
+    if any(_mentions(arg, names) for arg in node.args):
+        return True
+    return isinstance(node.func, ast.Attribute) and _mentions(node.func.value, names)
+
+
+def _mentions(node: ast.AST, names: set[str]) -> bool:
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and child.id in names:
+            return True
+        if isinstance(child, ast.Attribute) and dotted_path(child) in names:
+            return True
+    return False
+
+
+def _exits(body: list[ast.stmt]) -> bool:
+    return any(
+        isinstance(node, (ast.Raise, ast.Return))
+        for statement in body
+        for node in ast.walk(statement)
+    )
